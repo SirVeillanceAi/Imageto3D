@@ -16,13 +16,16 @@ Both run the same models the same way, so results match.
 - **Image → 3D:** upload a picture, pick **TRELLIS.2** or **Pixal3D**, optionally bake a PBR texture (base color, metal, roughness, normal, AO), optionally run **Hi3D** refinement (512 → 1024 → 1536). Preview in the browser and download every GLB.
 - **Multi-view → 3D (Pixal3D):** up to four photos of the same object (front, left, back, right, 90° apart) for a more accurate shape. Includes a one-click example (a marble whale tail: front, right and back).
 - **Hi3D refine (your mesh):** upload your own coarse mesh (.glb/.gltf/.obj/.stl) plus a reference image of the same object to get a much denser mesh.
-- **Status:** GPU, engine and model-download status.
+- **3D Viewer:** every GLB in the output folder (or one you upload) in the [Babylon.js viewer](https://doc.babylonjs.com/features/featuresDeepDive/babylonViewer), with a one-click **Babylon Sandbox** link (inspector, materials, measurements).
+- **CPU view (no GPU / no WebGL):** 3D viewers run in *your* browser and need WebGL. Computers without a GPU often have none, because Chrome is dropping its software (SwiftShader) fallback. The app then renders the model on the pod's CPU (`standalone/render_cpu.py`) and shows still views you can turn 45° at a time. After every job you also get four CPU-rendered views (front, 90°, back, 270°).
+- **Status:** GPU, engine and model-download status, plus the file-manager link.
+- **File manager:** [File Browser](https://filebrowser.org) on port **8080** serves `/workspace`, so you can download, upload, rename, delete and zip outputs, inputs, models and logs. The login is your `FILEBROWSER_*` or `GRADIO_*` username and password. If you set neither, the user is `admin` with a random password, printed once in the pod logs and saved in `/workspace/.filebrowser/login.txt`.
 
 Under the hood a headless, pinned ComfyUI runs on `127.0.0.1:8188` as the GPU engine. That is the only way to run all three models on a 10 GB card: the official TRELLIS.2, Pixal3D and Hi3D code each need their own Python/CUDA stack, and official Hi3D was only validated on a 96 GB GPU. ComfyUI's int8 versions and memory manager make them fit. The graphs in `standalone/pipeline.py` copy the node settings from ComfyUI's official Pixal3D/TRELLIS.2 template and PixelArtistry's Hi3D workflows.
 
 Set `GRADIO_USERNAME` and `GRADIO_PASSWORD` on the pod – otherwise anyone with the RunPod link can use the app.
 
-Files: `standalone/app.py` (Gradio UI + ComfyUI client), `standalone/pipeline.py` (graphs), `standalone/install.sh`, `standalone/start.sh`, `standalone/Dockerfile`, `standalone/template.md`. Shared GPU/driver checks live in `scripts/common.sh`; models use `scripts/download_models.py`.
+Files: `standalone/app.py` (Gradio UI + ComfyUI client + viewer routes), `standalone/pipeline.py` (graphs), `standalone/viewer.html` (Babylon viewer page), `standalone/render_cpu.py` (CPU previews), `standalone/filebrowser.sh` (file manager), `standalone/install.sh`, `standalone/start.sh`, `standalone/Dockerfile`, `standalone/template.md`. Shared GPU/driver checks live in `scripts/common.sh`; models use `scripts/download_models.py`.
 
 ---
 

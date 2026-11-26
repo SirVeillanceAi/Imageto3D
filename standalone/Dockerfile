@@ -19,5 +19,5 @@ COPY standalone /opt/imageto3d/standalone
 RUN chmod +x /opt/imageto3d/scripts/*.sh /opt/imageto3d/standalone/*.sh
 
 WORKDIR /workspace
-EXPOSE 7860 22
+EXPOSE 7860 8080 22
 CMD ["/opt/imageto3d/standalone/start.sh"]

@@ -19,6 +19,7 @@ EXPOSE_COMFY="${EXPOSE_COMFY:-0}"   # 1 = also serve the ComfyUI interface on po
 COMFY_ARGS="${COMFY_ARGS:-}"
 
 source "$REPO_DIR/scripts/common.sh"
+source "$REPO_DIR/standalone/filebrowser.sh"
 PY="$BASE_DIR/venv/bin/python"
 
 log "Repo: $REPO_DIR ($(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo 'no git'))"
@@ -48,6 +49,9 @@ if [ "$HAVE" != "$WANT" ]; then
 fi
 verify_cuda
 
+# Extras added after the first release: installed on boot so existing volumes upgrade themselves.
+"$PY" -c "import trimesh" 2>/dev/null || { log "Installing trimesh (CPU model previews)"; "$PY" -m pip install -q "trimesh==5.2.2"; }
+
 # Models download in the background; the Status tab shows what is ready.
 log "Downloading models in the background ($MODELS). Log: $LOG_DIR/models.log"
 "$PY" -I "$REPO_DIR/scripts/download_models.py" --comfy "$BASE_DIR/ComfyUI" --models "$MODELS" \
@@ -65,6 +69,8 @@ log "Starting ComfyUI engine on $LISTEN:$COMFY_PORT. Log: $LOG_DIR/comfyui.log"
         sleep 5
     done
 ) &
+
+start_filebrowser
 
 [ -n "${GRADIO_PASSWORD:-}" ] || warn "No GRADIO_USERNAME/GRADIO_PASSWORD set - anyone with the pod's link can use the app."
 log "Starting Gradio on port $GRADIO_PORT  ->  https://${RUNPOD_POD_ID:-<pod-id>}-${GRADIO_PORT}.proxy.runpod.net"

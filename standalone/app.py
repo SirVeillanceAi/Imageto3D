@@ -3,23 +3,32 @@
 ComfyUI runs headless on localhost as the inference engine (int8 models, dynamic VRAM,
 no compiled CUDA extensions); this app builds the graphs, queues them and shows the GLBs.
 """
+import hashlib
+import hmac
 import json
 import os
 import random
+import secrets
 import shutil
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+from collections import OrderedDict
 
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 
 import gradio as gr
 import websocket
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, Response
 from PIL import Image
+from starlette.responses import FileResponse
 
 import pipeline as P
+import render_cpu
 
 COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_DIR = os.environ.get("COMFY_DIR", "/workspace/imageto3d-standalone/ComfyUI")
@@ -27,6 +36,10 @@ INPUT_DIR = os.path.join(COMFY_DIR, "input")
 OUTPUT_DIR = os.path.join(COMFY_DIR, "output")
 MODELS_DIR = os.path.join(COMFY_DIR, "models")
 CLIENT_ID = str(uuid.uuid4())
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_SUBDIR = "viewer_uploads"
+POD_ID = os.environ.get("RUNPOD_POD_ID", "")
+FILEBROWSER_PORT = os.environ.get("FILEBROWSER_PORT", "8080")
 
 REQUIRED = {
     "trellis2": [("diffusion_models", P.TRELLIS2_UNET), ("vae", P.SHAPE_VAE), ("clip_vision", P.DINO_V3)],
@@ -150,6 +163,125 @@ def _seed(seed, randomize):
     return random.randint(0, 2**31 - 1) if randomize else int(seed)
 
 
+# ---------------------------------------------------------------- 3D viewer: signed file links
+def _load_secret():
+    path = os.path.join(os.path.dirname(COMFY_DIR), ".viewer_secret")
+    try:
+        with open(path) as f:
+            key = f.read().strip()
+        if len(key) >= 32:
+            return key.encode()
+    except OSError:
+        pass
+    key = secrets.token_hex(32)
+    try:
+        with open(path, "w") as f:
+            f.write(key)
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # not persisted: links just stop working after a restart
+    return key.encode()
+
+
+SECRET = _load_secret()
+OUTPUT_REAL = os.path.realpath(OUTPUT_DIR)
+
+
+def _sign(rel):
+    return hmac.new(SECRET, rel.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _resolve(token, rel):
+    """Map a signed link back to a file inside the output folder (404 otherwise)."""
+    if not hmac.compare_digest(token, _sign(rel)):
+        raise HTTPException(404)
+    path = os.path.realpath(os.path.join(OUTPUT_REAL, rel))
+    if not path.startswith(OUTPUT_REAL + os.sep) or not os.path.isfile(path):
+        raise HTTPException(404)
+    return path
+
+
+def glb_link(path):
+    rel = os.path.relpath(os.path.realpath(path), OUTPUT_REAL).replace(os.sep, "/")
+    return f"/glb/{_sign(rel)}/{urllib.parse.quote(rel)}"
+
+
+def _public_base(request):
+    h = request.headers if request is not None else {}
+    host = h.get("x-forwarded-host") or h.get("host") or (f"{POD_ID}-7860.proxy.runpod.net" if POD_ID else "localhost:7860")
+    proto = h.get("x-forwarded-proto") or ("https" if "proxy.runpod.net" in host else "http")
+    return f"{proto.split(',')[0].strip()}://{host.split(',')[0].strip()}"
+
+
+def viewer_links(path, request=None):
+    link = glb_link(path)
+    viewer = "/viewer?src=" + urllib.parse.quote(link, safe="")
+    sandbox = "https://sandbox.babylonjs.com/?assetUrl=" + urllib.parse.quote(_public_base(request) + link, safe="")
+    a = lambda href, text: f'<a href="{href}" target="_blank" rel="noopener">{text}</a>'
+    return " · ".join([a(viewer, "🔍 Open in 3D viewer"), a(sandbox, "Babylon Sandbox ↗"),
+                       a(viewer + "&mode=cpu", "CPU view (no GPU/WebGL)")])
+
+
+def viewer_iframe(path, height=560):
+    if not path:
+        return "<div style='padding:40px;text-align:center;opacity:.7'>Pick or upload a model.</div>"
+    src = "/viewer?src=" + urllib.parse.quote(glb_link(path), safe="")
+    return (f'<iframe src="{src}" style="width:100%;height:{height}px;border:0;border-radius:8px;background:#262626" '
+            f'allow="fullscreen; xr-spatial-tracking"></iframe>')
+
+
+def cpu_previews(path):
+    try:
+        return [(img, f"{os.path.basename(path)} - {cap}") for img, cap in render_cpu.render_views(path)]
+    except Exception as e:  # preview is a convenience; never fail the job over it
+        gr.Warning(f"CPU preview failed: {e}")
+        return []
+
+
+def after_job(path, request: gr.Request):
+    """Runs after a generation: viewer links + CPU-rendered views (shown even without WebGL)."""
+    if not path or not os.path.isfile(path):
+        return "", []
+    return viewer_links(path, request), cpu_previews(path)
+
+
+def list_models():
+    found = []
+    for root, _dirs, files in os.walk(OUTPUT_DIR):
+        for f in files:
+            if f.lower().endswith(".glb"):
+                p = os.path.join(root, f)
+                found.append((os.path.getmtime(p), os.path.relpath(p, OUTPUT_DIR)))
+    return [rel for _t, rel in sorted(found, reverse=True)]
+
+
+def refresh_models():
+    models = list_models()
+    return gr.update(choices=models, value=models[0] if models else None)
+
+
+def view_model(rel, request: gr.Request):
+    if not rel:
+        return viewer_iframe(None), "", []
+    path = os.path.realpath(os.path.join(OUTPUT_REAL, rel))
+    if not path.startswith(OUTPUT_REAL + os.sep) or not os.path.isfile(path):
+        raise gr.Error("File not found - press Refresh.")
+    return viewer_iframe(path), viewer_links(path, request), cpu_previews(path)
+
+
+def upload_model(file):
+    if not file:
+        return gr.update()
+    if not file.lower().endswith(".glb"):
+        raise gr.Error("The viewer takes .glb files.")
+    os.makedirs(os.path.join(OUTPUT_DIR, UPLOAD_SUBDIR), exist_ok=True)
+    name = os.path.basename(file)
+    dest = os.path.join(OUTPUT_DIR, UPLOAD_SUBDIR, name)
+    shutil.copy(file, dest)
+    rel = os.path.relpath(dest, OUTPUT_DIR)
+    return gr.update(choices=list_models(), value=rel)
+
+
 # ---------------------------------------------------------------- tab handlers
 def generate(image, model, remove_bg, resolution, texture, texture_size, face_count, hi3d, seed, randomize,
              progress=gr.Progress()):
@@ -177,7 +309,7 @@ def generate(image, model, remove_bg, resolution, texture, texture_size, face_co
     note = f"Done in {time.time() - t0:.0f} s - {('TRELLIS.2' if model == 'trellis2' else 'Pixal3D')}, seed {seed}."
     if hi3d != "off":
         note += " Hi3D files are geometry only (no texture)."
-    return preview, all_files, note, seed
+    return preview, all_files, note, seed, preview
 
 
 def multiview(front, left, back, right, remove_bg, fov, resolution, texture, texture_size, face_count, hi3d,
@@ -203,7 +335,7 @@ def multiview(front, left, back, right, remove_bg, fov, resolution, texture, tex
     note = f"Done in {time.time() - t0:.0f} s - Pixal3D multi-view ({', '.join(given)}), seed {seed}."
     if hi3d != "off":
         note += " Hi3D files are geometry only (no texture)."
-    return all_files[0], all_files, note, seed
+    return all_files[0], all_files, note, seed, all_files[0]
 
 
 def refine(mesh, image, target, remove_bg, seed, randomize, progress=gr.Progress()):
@@ -219,7 +351,8 @@ def refine(mesh, image, target, remove_bg, seed, randomize, progress=gr.Progress
     all_files = [f for r in reversed(P.HI3D_LADDER) for f in files.get(f"save_hi3d_{r}", [])]
     if not all_files:
         raise gr.Error("The job finished but produced no GLB file - check /workspace/logs/comfyui.log.")
-    return all_files[0], all_files, f"Done in {time.time() - t0:.0f} s, seed {seed}. Geometry only (no texture).", seed
+    return (all_files[0], all_files, f"Done in {time.time() - t0:.0f} s, seed {seed}. Geometry only (no texture).",
+            seed, all_files[0])
 
 
 def status():
@@ -230,6 +363,9 @@ def status():
         lines.append(f"- GPU: {gpu or 'none detected'}")
     except Exception:
         lines.append("- GPU: nvidia-smi not available")
+    fb = f"https://{POD_ID}-{FILEBROWSER_PORT}.proxy.runpod.net" if POD_ID else f"port {FILEBROWSER_PORT}"
+    lines.append(f"- File manager (File Browser): {fb} - login shown in the pod logs and saved in "
+                 "`/workspace/.filebrowser/login.txt`")
     lines.append("\n### Models")
     seen = set()
     for group, files in REQUIRED.items():
@@ -271,8 +407,13 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
                 out_model = gr.Model3D(label="Preview", height=480, clear_color=(0.15, 0.15, 0.15, 1.0))
                 out_files = gr.File(label="Download GLB files", file_count="multiple")
                 out_note = gr.Markdown()
+                out_links = gr.Markdown()
+                out_cpu = gr.Gallery(label="CPU preview (works without a GPU or WebGL)", columns=4, height=200,
+                                     object_fit="contain")
+                out_path = gr.State()
         btn_gen.click(generate, [in_image, in_model, in_bg, in_res, in_tex, in_texsize, in_faces, in_hi3d,
-                                 in_seed, in_rand], [out_model, out_files, out_note, in_seed])
+                                 in_seed, in_rand], [out_model, out_files, out_note, in_seed, out_path]) \
+            .then(after_job, out_path, [out_links, out_cpu])
 
     with gr.Tab("Multi-view → 3D (Pixal3D)"):
         gr.Markdown("Photos of the **same object** from views 90° apart: front, left side, back, right side. "
@@ -307,8 +448,13 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
                 mv_out = gr.Model3D(label="Preview", height=480, clear_color=(0.15, 0.15, 0.15, 1.0))
                 mv_files = gr.File(label="Download GLB files", file_count="multiple")
                 mv_note = gr.Markdown()
+                mv_links = gr.Markdown()
+                mv_cpu = gr.Gallery(label="CPU preview (works without a GPU or WebGL)", columns=4, height=200,
+                                    object_fit="contain")
+                mv_path = gr.State()
         btn_mv.click(multiview, [mv_front, mv_left, mv_back, mv_right, mv_bg, mv_fov, mv_res, mv_tex, mv_texsize,
-                                 mv_faces, mv_hi3d, mv_seed, mv_rand], [mv_out, mv_files, mv_note, mv_seed])
+                                 mv_faces, mv_hi3d, mv_seed, mv_rand], [mv_out, mv_files, mv_note, mv_seed, mv_path]) \
+            .then(after_job, mv_path, [mv_links, mv_cpu])
 
     with gr.Tab("Hi3D refine (your mesh)"):
         gr.Markdown("Bring a coarse mesh and a reference image of the **same object**. "
@@ -327,7 +473,28 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
                 r_out = gr.Model3D(label="Preview", height=480, clear_color=(0.15, 0.15, 0.15, 1.0))
                 r_files = gr.File(label="Download GLB files", file_count="multiple")
                 r_note = gr.Markdown()
-        btn_ref.click(refine, [r_mesh, r_image, r_target, r_bg, r_seed, r_rand], [r_out, r_files, r_note, r_seed])
+                r_links = gr.Markdown()
+                r_cpu = gr.Gallery(label="CPU preview (works without a GPU or WebGL)", columns=4, height=200,
+                                   object_fit="contain")
+                r_path = gr.State()
+        btn_ref.click(refine, [r_mesh, r_image, r_target, r_bg, r_seed, r_rand], [r_out, r_files, r_note, r_seed, r_path]) \
+            .then(after_job, r_path, [r_links, r_cpu])
+
+    with gr.Tab("3D Viewer"):
+        gr.Markdown("Browse every model in the output folder, or upload a .glb. The 3D view uses the "
+                    "[Babylon.js viewer](https://doc.babylonjs.com/features/featuresDeepDive/babylonViewer) in your browser. "
+                    "On a device without a GPU or WebGL, the viewer switches to **CPU view**, which the pod renders on its own CPU.")
+        with gr.Row():
+            v_pick = gr.Dropdown(label="Model (newest first)", choices=[], scale=4, allow_custom_value=False)
+            v_refresh = gr.Button("Refresh", scale=1)
+            v_upload = gr.UploadButton("Upload .glb", file_types=[".glb"], type="filepath", scale=1)
+        v_frame = gr.HTML(viewer_iframe(None))
+        v_links = gr.Markdown()
+        v_cpu = gr.Gallery(label="CPU preview", columns=4, height=220, object_fit="contain")
+        v_refresh.click(refresh_models, None, v_pick)
+        v_upload.upload(upload_model, v_upload, v_pick)
+        v_pick.change(view_model, v_pick, [v_frame, v_links, v_cpu])
+        demo.load(refresh_models, None, v_pick)
 
     with gr.Tab("Status"):
         status_md = gr.Markdown()
@@ -335,9 +502,51 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
         demo.load(status, None, status_md)
 
 
+# ---------------------------------------------------------------- web routes (viewer, signed files, CPU renders)
+web = FastAPI()
+with open(os.path.join(APP_DIR, "viewer.html"), encoding="utf-8") as _f:
+    VIEWER_HTML = _f.read()
+_png_cache = OrderedDict()
+
+
+@web.get("/viewer", response_class=HTMLResponse)
+def viewer_page():
+    return HTMLResponse(VIEWER_HTML, headers={"Cache-Control": "no-cache"})
+
+
+@web.get("/glb/{token}/{rel:path}")
+def glb_file(token: str, rel: str):
+    path = _resolve(token, rel)
+    # CORS lets sandbox.babylonjs.com fetch the file; the unguessable token is the access check.
+    return FileResponse(path, media_type="model/gltf-binary", filename=os.path.basename(path),
+                        content_disposition_type="inline",
+                        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "private, max-age=3600"})
+
+
+@web.get("/glb-render/{token}/{rel:path}")
+def glb_render(token: str, rel: str, az: float = 0, el: float = 15, size: int = 768):
+    path = _resolve(token, rel)
+    az, el = round(az / 15) * 15 % 360, max(-60, min(75, round(el / 15) * 15))
+    size = max(256, min(1024, int(size) // 128 * 128))
+    key = (path, os.path.getmtime(path), az, el, size)
+    png = _png_cache.get(key)
+    if png is None:
+        try:
+            png = render_cpu.render_png(path, az, el, size)
+        except Exception as e:
+            raise HTTPException(500, f"render failed: {e}")
+        _png_cache[key] = png
+        while len(_png_cache) > 96:
+            _png_cache.popitem(last=False)
+    return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
+
+
 if __name__ == "__main__":
+    import uvicorn
+
     user, pw = os.environ.get("GRADIO_USERNAME"), os.environ.get("GRADIO_PASSWORD")
-    demo.queue(default_concurrency_limit=1).launch(
-        server_name="0.0.0.0", server_port=int(os.environ.get("GRADIO_PORT", 7860)),
-        auth=(user, pw) if user and pw else None,
-        allowed_paths=[OUTPUT_DIR, os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")], show_error=True)
+    demo.queue(default_concurrency_limit=1)
+    app = gr.mount_gradio_app(
+        web, demo, path="/", auth=(user, pw) if user and pw else None,
+        allowed_paths=[OUTPUT_DIR, os.path.join(APP_DIR, "examples")], show_error=True)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("GRADIO_PORT", 7860)), log_level="warning")

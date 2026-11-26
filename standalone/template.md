@@ -12,7 +12,7 @@ In RunPod go to **Templates → New Template** and fill in the fields below.
 | Container Disk | `30 GB` |
 | Volume Disk | `60 GB` |
 | Volume Mount Path | `/workspace` |
-| Expose HTTP Ports | `7860` (add `8188` only if you set `EXPOSE_COMFY=1`) |
+| Expose HTTP Ports | `7860, 8080` (7860 = app, 8080 = file manager; add `8188` only if you set `EXPOSE_COMFY=1`) |
 | Expose TCP Ports | `22` |
 
 ### Option B start command (no Docker image needed)
@@ -26,6 +26,8 @@ bash -c "apt-get update && apt-get install -y git ca-certificates && rm -rf /opt
 | Key | Default | What it does |
 |---|---|---|
 | `GRADIO_USERNAME` / `GRADIO_PASSWORD` | – | **Recommended.** Adds a login to the app – the RunPod link is otherwise open to anyone who has it. Use RunPod **Secrets**. |
+| `FILEBROWSER_USERNAME` / `FILEBROWSER_PASSWORD` | your Gradio login, else `admin` + random | Login for the file manager on port 8080 (8+ character password). A random password is saved in `/workspace/.filebrowser/login.txt`. |
+| `FILEBROWSER` | `1` | `0` turns the file manager off. |
 | `MODELS` | `trellis2,pixal3d,hi3d` | Which model sets to download. |
 | `PIXAL3D_MULTIVIEW` | `1` | Downloads the Pixal3D multi-view model (5–6 GB) for the multi-view tab. `0` skips it. |
 | `HI3D_PRECISION` | `int8` | `int8` (4.3 GB, faster) or `fp16` (7.7 GB). |
@@ -39,4 +41,5 @@ bash -c "apt-get update && apt-get install -y git ca-certificates && rm -rf /opt
 
 - Any NVIDIA GPU with **10 GB+ VRAM**. **Filter → CUDA Versions: 13.0.**
 - First boot: about 10 min install, then the app opens while ~23 GB of models download in the background. The **Status** tab shows which models are ready.
-- Click **Connect → HTTP 7860** to open the app.
+- Click **Connect → HTTP 7860** to open the app, and **HTTP 8080** for the file manager.
+- **Viewing models:** the **3D Viewer** tab, or the links under each result: *Open in 3D viewer*, *Babylon Sandbox*, *CPU view*. CPU view works on computers with no GPU/WebGL. The pod renders the images itself.

@@ -42,7 +42,7 @@ git clone https://github.com/Aero-Ex/Aero-Ex-ComfyUI-Hi3D ComfyUI/custom_nodes/C
 git -C ComfyUI/custom_nodes/ComfyUI-Hi3D checkout -q "$HI3D_REF"
 
 log "Installing Gradio app dependencies"
-"$PY" -m pip install "gradio==6.32.0" "websocket-client==1.9.2" "huggingface_hub>=0.30" hf_transfer pillow
+"$PY" -m pip install "gradio==6.32.0" "websocket-client==1.9.2" "huggingface_hub>=0.30" hf_transfer pillow "trimesh==5.2.2"
 
 touch "$BASE_DIR/.installed"
 log "Install complete"
