@@ -125,7 +125,7 @@ elif [ "$UPDATE_ON_START" = "1" ]; then
     log "Updating ComfyUI and Hi3D node..."
     git -C "$INSTALL_DIR/ComfyUI" pull --ff-only || warn "ComfyUI update failed"
     "$PY" -I -m pip install --no-warn-script-location -r "$INSTALL_DIR/ComfyUI/requirements.txt" || warn "requirements update failed"
-    git -C "$INSTALL_DIR/ComfyUI/custom_nodes/ComfyUI-Hi3D" pull --ff-only || warn "Hi3D node update failed"
+    git -C "$INSTALL_DIR/ComfyUI/custom_nodes/ComfyUI-Hi3D" checkout -q main && git -C "$INSTALL_DIR/ComfyUI/custom_nodes/ComfyUI-Hi3D" pull --ff-only || warn "Hi3D node update failed"
 fi
 
 align_torch
@@ -135,13 +135,21 @@ log "Checking models: $MODELS"
 "$PY" -I "$REPO_DIR/scripts/download_models.py" --comfy "$INSTALL_DIR/ComfyUI" --models "$MODELS" \
     2>&1 | tee -a "$LOG_DIR/models.log" || warn "Some models failed to download - see $LOG_DIR/models.log"
 
-# Ship the Hi3D refine workflows into the ComfyUI workflow browser
+# Put the Hi3D workflows into the ComfyUI workflow sidebar (Imageto3D folder).
+# PixelArtistry 04 is skipped: it needs the UltraTex / Animated-Characters packs.
 WF_DIR="$INSTALL_DIR/ComfyUI/user/default/workflows/Imageto3D"
 mkdir -p "$WF_DIR"
-cp -n "$INSTALL_DIR"/ComfyUI/custom_nodes/ComfyUI-Hi3D/workflows/*.json "$WF_DIR/" 2>/dev/null || true
+for wf in "$INSTALL_DIR"/Add-Ons/PixelArtistry-Hi3D/workflows/PixelArtistry_Hi3D_0[123]_*.json \
+          "$INSTALL_DIR"/ComfyUI/custom_nodes/ComfyUI-Hi3D/workflows/*.json; do
+    [ -f "$wf" ] || continue
+    dest="$WF_DIR/$(basename "$wf")"
+    [ -f "$dest" ] && continue
+    cp "$wf" "$dest"
+    [ "${HI3D_PRECISION:-int8}" = "fp16" ] && sed -i 's/hi3d_v1_int8\.safetensors/hi3d_v1.safetensors/g' "$dest"
+done
 
 log "Starting ComfyUI on port $COMFY_PORT  ->  https://${RUNPOD_POD_ID:-<pod-id>}-${COMFY_PORT}.proxy.runpod.net"
-log "TRELLIS.2 / Pixal3D: Templates > 3D > 'Pixal3D: Image to Model'. Hi3D: Workflows > Imageto3D."
+log "Start with Workflows > Imageto3D > PixelArtistry_Hi3D_01_Image_to_Hi3D (image -> TRELLIS.2/Pixal3D -> Hi3D)."
 cd "$INSTALL_DIR"
 while true; do
     # No --cpu / --lowvram: ComfyUI's dynamic VRAM handles 10 GB+ cards on GPU.

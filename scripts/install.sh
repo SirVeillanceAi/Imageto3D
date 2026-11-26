@@ -11,8 +11,10 @@ CEI_REPO="https://github.com/Tavris1/ComfyUI-Easy-Install"
 # Tested commit of the MAC-Linux branch (v3.30.3, 2026-11-19). Set CEI_REF=MAC-Linux for latest.
 CEI_REF="${CEI_REF:-ab2d28c6b936d9745a4127567d795043e15608f6}"
 HI3D_REPO="https://github.com/Aero-Ex/Aero-Ex-ComfyUI-Hi3D"
-# Tested commit (2026-11-17). Set HI3D_REF=main for latest.
-HI3D_REF="${HI3D_REF:-25937375c81beeee8ad16d8926f7604943651c06}"
+# Version tested by PixelArtistry-Hi3D (https://pixel-artistry.com/Hi3D/). Set HI3D_REF=main for latest.
+HI3D_REF="${HI3D_REF:-227d18f}"
+PA_REPO="https://github.com/pixelartistry/PixelArtistry-Hi3D"
+MIN_COMFY="0.42.0"   # Hi3D nodes need >= 0.42.0; native TRELLIS.2/Pixal3D need >= 0.34.0
 
 log() { echo -e "\033[92m[install]\033[0m $*"; }
 
@@ -35,10 +37,9 @@ bash ./ComfyUI-Easy-Install.sh </dev/null || true
 PY="$INSTALL_DIR/python_embeded/python"
 [ -x "$PY" ] && [ -f "$INSTALL_DIR/ComfyUI/main.py" ] || { echo "Easy-Install did not finish (python_embeded or ComfyUI missing)"; exit 1; }
 
-# Native TRELLIS.2 / Pixal3D nodes need ComfyUI >= 0.34.0
 COMFY_VER="$(grep -oP '__version__ = "\K[^"]+' ComfyUI/comfyui_version.py)"
 log "ComfyUI $COMFY_VER"
-if [ "$(printf '%s\n0.34.0\n' "$COMFY_VER" | sort -V | head -n1)" != "0.34.0" ]; then
+if [ "$(printf '%s\n%s\n' "$COMFY_VER" "$MIN_COMFY" | sort -V | head -n1)" != "$MIN_COMFY" ]; then
     git -C ComfyUI pull --ff-only
     "$PY" -I -m pip install --no-warn-script-location -r ComfyUI/requirements.txt
 fi
@@ -49,6 +50,10 @@ log "Installing Hi3D v1.0 node (Aero-Ex, dependency-free)"
 rm -rf ComfyUI/custom_nodes/ComfyUI-Hi3D
 git clone "$HI3D_REPO" ComfyUI/custom_nodes/ComfyUI-Hi3D
 git -C ComfyUI/custom_nodes/ComfyUI-Hi3D checkout -q "$HI3D_REF"
+
+log "Fetching PixelArtistry Hi3D workflows (image -> TRELLIS.2/Pixal3D -> Hi3D)"
+rm -rf Add-Ons/PixelArtistry-Hi3D
+git clone --depth 1 "$PA_REPO" Add-Ons/PixelArtistry-Hi3D || log "PixelArtistry workflows unavailable - skipping"
 
 "$PY" -I -m pip install --no-warn-script-location "huggingface_hub>=0.30" hf_transfer
 
