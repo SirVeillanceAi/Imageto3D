@@ -87,6 +87,9 @@ if (!/^\/glb\/[0-9a-f]{32}\/[^?#]+\.glb$/i.test(src)) {
       img.classList.remove("busy");
       let text = "Could not render this model on the CPU.";
       try { const r = await fetch(url); const j = await r.json(); if (j.detail) text = j.detail; } catch (e) {}
+      img.style.display = "none";
+      document.querySelector(".ctl").style.display = "none";
+      $("hint").style.display = "none";
       msg(text);
     };
     next.src = url;
