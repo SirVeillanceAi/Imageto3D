@@ -1,11 +1,12 @@
-# Builds the RunPod image and publishes it to GitHub Container Registry on every push to main:
-#   ghcr.io/sirveillanceai/imageto3d:latest
+# Builds both RunPod images and publishes them to GitHub Container Registry on every push to main:
+#   ghcr.io/sirveillanceai/imageto3d:latest         (ComfyUI-Easy-Install template)
+#   ghcr.io/sirveillanceai/imageto3d-gradio:latest  (standalone Gradio template)
 name: Build RunPod image
 
 on:
   push:
     branches: [main]
-    paths: ["docker/**", "scripts/**", ".github/workflows/docker.yml"]
+    paths: ["docker/**", "scripts/**", "standalone/**", ".github/workflows/docker.yml"]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +15,13 @@ permissions:
 
 jobs:
   build:
+    strategy:
+      matrix:
+        include:
+          - dockerfile: docker/Dockerfile
+            image: ghcr.io/sirveillanceai/imageto3d
+          - dockerfile: standalone/Dockerfile
+            image: ghcr.io/sirveillanceai/imageto3d-gradio
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,9 +34,9 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/sirveillanceai/imageto3d:latest
-            ghcr.io/sirveillanceai/imageto3d:${{ github.sha }}
+            ${{ matrix.image }}:latest
+            ${{ matrix.image }}:${{ github.sha }}
