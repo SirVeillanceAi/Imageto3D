@@ -42,4 +42,5 @@ bash -c "apt-get update && apt-get install -y git ca-certificates && rm -rf /opt
 - Any NVIDIA GPU with **10 GB+ VRAM**. **Filter → CUDA Versions: 13.0.**
 - First boot: about 10 min install, then the app opens while ~23 GB of models download in the background. The **Status** tab shows which models are ready.
 - Click **Connect → HTTP 7860** to open the app, and **HTTP 8080** for the file manager.
+- **No GPU available?** If RunPod starts the pod with 0 GPUs (it offers this when your GPU is taken), the app starts in **viewer-only mode**: 3D viewer, CPU view and file manager work, and generation is off. Stop and start the pod again later to get a GPU.
 - **Viewing models:** the **3D Viewer** tab, or the links under each result: *Open in 3D viewer*, *Babylon Sandbox*, *CPU view*. CPU view works on computers with no GPU/WebGL. The pod renders the images itself.

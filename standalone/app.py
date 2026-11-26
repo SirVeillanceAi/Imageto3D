@@ -40,6 +40,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_SUBDIR = "viewer_uploads"
 POD_ID = os.environ.get("RUNPOD_POD_ID", "")
 FILEBROWSER_PORT = os.environ.get("FILEBROWSER_PORT", "8080")
+VIEWER_ONLY = os.environ.get("VIEWER_ONLY") == "1"   # pod started without a GPU
 
 REQUIRED = {
     "trellis2": [("diffusion_models", P.TRELLIS2_UNET), ("vae", P.SHAPE_VAE), ("clip_vision", P.DINO_V3)],
@@ -152,6 +153,9 @@ def _stage_mesh(path):
 
 
 def _check(groups):
+    if VIEWER_ONLY:
+        raise gr.Error("This pod has no GPU, so it runs in viewer-only mode. Stop the pod and start it again "
+                       "with a GPU to generate. The 3D Viewer tab and the file manager work now.")
     if not comfy_ready():
         raise gr.Error("The ComfyUI engine is still starting (or crashed). Wait a minute and try again; see /workspace/logs/comfyui.log.")
     missing = missing_models(groups)
@@ -382,6 +386,10 @@ def status():
 with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
     gr.Markdown("# Imageto3D\nImage → 3D with **TRELLIS.2** or **Pixal3D**, plus **Hi3D v1.0** detail refinement. "
                 "Runs on the GPU; one job at a time.")
+    if VIEWER_ONLY:
+        gr.Markdown("⚠️ **Viewer-only mode: this pod has no GPU.** Generation is off. Use the **3D Viewer** tab "
+                    "(CPU view works without a GPU) and the file manager on port "
+                    f"{FILEBROWSER_PORT}. To generate, stop the pod and start it again once a GPU is available.")
 
     with gr.Tab("Image → 3D"):
         with gr.Row():

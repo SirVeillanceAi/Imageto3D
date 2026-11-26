@@ -25,6 +25,35 @@ PY="$BASE_DIR/venv/bin/python"
 log "Repo: $REPO_DIR ($(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo 'no git'))"
 install_system_packages
 start_ssh
+
+# ---- No GPU (e.g. RunPod restarted the pod with "0 GPUs"): viewer + file manager only.
+if ! nvidia-smi -L >/dev/null 2>&1; then
+    warn "No NVIDIA GPU on this pod - starting in VIEWER-ONLY mode (3D viewer, CPU previews, file manager)."
+    warn "Generation needs a GPU: stop the pod and start it again once a GPU is available."
+    VPY="$BASE_DIR/venv/bin/python"
+    if ! "$VPY" -c "import gradio, trimesh, websocket" 2>/dev/null; then
+        VPY="$BASE_DIR/venv-viewer/bin/python"
+        if ! "$VPY" -c "import gradio, trimesh, websocket" 2>/dev/null; then
+            log "Installing the light viewer environment (no PyTorch)"
+            mkdir -p "$BASE_DIR"
+            python3.12 -m venv "$BASE_DIR/venv-viewer"
+            "$VPY" -m pip install -q --upgrade pip
+            "$VPY" -m pip install -q "gradio==6.32.0" "websocket-client==1.9.2" "trimesh==5.2.2" pillow numpy scipy \
+                || die "Could not install the viewer environment."
+        fi
+    fi
+    mkdir -p "$BASE_DIR/ComfyUI/output" "$BASE_DIR/ComfyUI/input" "$BASE_DIR/ComfyUI/models"
+    start_filebrowser
+    export VIEWER_ONLY=1 COMFY_URL="http://127.0.0.1:$COMFY_PORT" COMFY_DIR="$BASE_DIR/ComfyUI" GRADIO_PORT GRADIO_ANALYTICS_ENABLED=False
+    log "Starting the viewer on port $GRADIO_PORT  ->  https://${RUNPOD_POD_ID:-<pod-id>}-${GRADIO_PORT}.proxy.runpod.net"
+    cd "$REPO_DIR/standalone"
+    while true; do
+        "$VPY" app.py 2>&1 | tee -a "$LOG_DIR/gradio.log"
+        warn "App exited; restarting in 5 s"
+        sleep 5
+    done
+fi
+
 check_gpu
 
 WANT="$(pick_torch_channel)"
