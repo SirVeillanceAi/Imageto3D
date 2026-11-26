@@ -83,7 +83,12 @@ if (!/^\/glb\/[0-9a-f]{32}\/[^?#]+\.glb$/i.test(src)) {
     img.classList.add("busy");
     const next = new Image();
     next.onload = () => { if (pending === url) { img.src = url; img.classList.remove("busy"); } };
-    next.onerror = () => { img.classList.remove("busy"); msg("Could not render this model on the CPU."); };
+    next.onerror = async () => {
+      img.classList.remove("busy");
+      let text = "Could not render this model on the CPU.";
+      try { const r = await fetch(url); const j = await r.json(); if (j.detail) text = j.detail; } catch (e) {}
+      msg(text);
+    };
     next.src = url;
   };
 

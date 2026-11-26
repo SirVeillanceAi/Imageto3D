@@ -237,6 +237,9 @@ def viewer_iframe(path, height=560):
 def cpu_previews(path):
     try:
         return [(img, f"{os.path.basename(path)} - {cap}") for img, cap in render_cpu.render_views(path)]
+    except render_cpu.NotEnoughMemory as e:
+        gr.Warning(str(e))
+        return []
     except Exception as e:  # preview is a convenience; never fail the job over it
         gr.Warning(f"CPU preview failed: {e}")
         return []
@@ -264,13 +267,25 @@ def refresh_models():
     return gr.update(choices=models, value=models[0] if models else None)
 
 
+def _picked(rel):
+    path = os.path.realpath(os.path.join(OUTPUT_REAL, rel or ""))
+    if not rel or not path.startswith(OUTPUT_REAL + os.sep) or not os.path.isfile(path):
+        raise gr.Error("File not found - press Refresh.")
+    return path
+
+
 def view_model(rel, request: gr.Request):
+    """Cheap: the 3D view renders in the browser. CPU renders only run when asked for."""
     if not rel:
         return viewer_iframe(None), "", []
-    path = os.path.realpath(os.path.join(OUTPUT_REAL, rel))
-    if not path.startswith(OUTPUT_REAL + os.sep) or not os.path.isfile(path):
-        raise gr.Error("File not found - press Refresh.")
-    return viewer_iframe(path), viewer_links(path, request), cpu_previews(path)
+    path = _picked(rel)
+    return viewer_iframe(path), viewer_links(path, request), []
+
+
+def render_picked(rel):
+    if not rel:
+        raise gr.Error("Pick a model first.")
+    return cpu_previews(_picked(rel))
 
 
 def upload_model(file):
@@ -498,10 +513,12 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
             v_upload = gr.UploadButton("Upload .glb", file_types=[".glb"], type="filepath", scale=1)
         v_frame = gr.HTML(viewer_iframe(None))
         v_links = gr.Markdown()
+        v_render = gr.Button("Render CPU preview images (front / 90° / back / 270°)")
         v_cpu = gr.Gallery(label="CPU preview", columns=4, height=220, object_fit="contain")
         v_refresh.click(refresh_models, None, v_pick)
         v_upload.upload(upload_model, v_upload, v_pick)
         v_pick.change(view_model, v_pick, [v_frame, v_links, v_cpu])
+        v_render.click(render_picked, v_pick, v_cpu)
         demo.load(refresh_models, None, v_pick)
 
     with gr.Tab("Status"):
@@ -541,6 +558,8 @@ def glb_render(token: str, rel: str, az: float = 0, el: float = 15, size: int = 
     if png is None:
         try:
             png = render_cpu.render_png(path, az, el, size)
+        except render_cpu.NotEnoughMemory as e:
+            raise HTTPException(507, str(e))
         except Exception as e:
             raise HTTPException(500, f"render failed: {e}")
         _png_cache[key] = png

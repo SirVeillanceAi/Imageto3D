@@ -47,26 +47,86 @@ def _mesh_colors(mesh, faces, bary):
     return np.clip(col, 0, 1) ** 2.2
 
 
+def memory_budget_mb():
+    """RAM the renderer may use: cgroup limit minus what is in use, else /proc/meminfo."""
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            limit = f.read().strip()
+        with open("/sys/fs/cgroup/memory.current") as f:
+            used = int(f.read().strip())
+        if limit != "max":
+            return max(0, (int(limit) - used) // 2**20)
+    except OSError:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            info = {line.split(":")[0]: int(line.split()[1]) for line in f}
+        return info.get("MemAvailable", 4 * 2**20) // 1024
+    except OSError:
+        return 4096
+
+
+def sample_count(requested=1_200_000):
+    """Fewer points on small pods (RunPod's 0-GPU mode has very little RAM)."""
+    mb = memory_budget_mb()
+    if mb < 600:
+        return 250_000
+    if mb < 1500:
+        return 500_000
+    return requested
+
+
+class NotEnoughMemory(RuntimeError):
+    pass
+
+
+def _check_memory(path, count):
+    """Refuse instead of getting the whole app OOM-killed on tiny pods."""
+    import os
+    with _lock:
+        hit = _cache.get(path)
+    if hit and hit[0] == os.path.getmtime(path):
+        return
+    need = os.path.getsize(path) / 2**20 * 8 + count * 64 / 2**20 + 60
+    have = memory_budget_mb()
+    if have < need:
+        raise NotEnoughMemory(
+            f"This pod has about {have} MB of free RAM; the CPU preview of this {os.path.getsize(path) // 2**20} MB "
+            f"model needs about {need:.0f} MB. Use the 3D viewer in your browser, download the file, "
+            "or open it on a pod with a GPU (more RAM).")
+
+
 def _sample(path, count):
-    loaded = trimesh.load(path, force="scene")
+    loaded = trimesh.load(path, force="scene", process=False)
     meshes = [g for g in loaded.dump() if isinstance(g, trimesh.Trimesh) and len(g.faces)]
+    del loaded
     if not meshes:
         raise ValueError("No triangle meshes in file")
-    areas = np.array([m.area for m in meshes], float)
-    per_mesh = np.maximum((count * areas / areas.sum()).astype(int), 1)
+    # face areas in float32, chunked, to keep peak memory low on big meshes
+    areas_per_mesh = []
+    for m in meshes:
+        v = np.asarray(m.vertices, np.float32)
+        f = np.asarray(m.faces)
+        a = np.empty(len(f), np.float32)
+        for i in range(0, len(f), 500_000):
+            t = v[f[i:i + 500_000]]
+            a[i:i + 500_000] = 0.5 * np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1)
+        areas_per_mesh.append(a)
+    totals = np.array([a.sum() for a in areas_per_mesh], float)
+    per_mesh = np.maximum((count * totals / max(totals.sum(), 1e-12)).astype(int), 1)
     rng = np.random.default_rng(0)
     pts, nrm, col = [], [], []
-    for mesh, k in zip(meshes, per_mesh):
-        fa = mesh.area_faces
-        faces = rng.choice(len(fa), size=k, p=fa / fa.sum())
-        r1, r2 = rng.random(k), rng.random(k)
+    for mesh, a, k in zip(meshes, areas_per_mesh, per_mesh):
+        cdf = np.cumsum(a, dtype=np.float64)
+        faces = np.minimum(np.searchsorted(cdf, rng.random(k) * cdf[-1]), len(a) - 1)
+        r1, r2 = rng.random(k, np.float32), rng.random(k, np.float32)
         s = np.sqrt(r1)
         bary = np.stack([1 - s, s * (1 - r2), s * r2], axis=1)
-        tri = mesh.triangles[faces]
+        tri = np.asarray(mesh.vertices, np.float32)[mesh.faces[faces]]
         pts.append(np.einsum("ij,ijk->ik", bary, tri))
-        vn = mesh.vertex_normals[mesh.faces[faces]]
-        nrm.append(np.einsum("ij,ijk->ik", bary, vn))
-        col.append(_mesh_colors(mesh, faces, bary))
+        nrm.append(np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]))   # flat normals: no full-mesh pass
+        col.append(_mesh_colors(mesh, faces, bary).astype(np.float32))
+        del tri, cdf
     pts, nrm, col = np.concatenate(pts), np.concatenate(nrm), np.concatenate(col)
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-12
     lo, hi = pts.min(0), pts.max(0)
@@ -81,19 +141,23 @@ def _points(path, count):
     mtime = os.path.getmtime(path)
     with _lock:
         hit = _cache.get(path)
-        if hit and hit[0] == mtime:
+        if hit and hit[0] == mtime and len(hit[1]) >= 0.9 * count:
             _cache.move_to_end(path)
             return hit[1:]
     data = _sample(path, count)
     with _lock:
         _cache[path] = (mtime, *data)
-        while len(_cache) > 2:
+        while len(_cache) > (2 if count >= 1_000_000 else 1):
             _cache.popitem(last=False)
     return data
 
 
-def render(path, azimuth=0.0, elevation=15.0, size=768, count=1_200_000):
+def render(path, azimuth=0.0, elevation=15.0, size=768, count=None):
     """Render one view. Azimuth 0 looks at the model's front (+Z, glTF convention)."""
+    count = count or sample_count()
+    if count < 1_000_000:
+        size = min(size, 640)
+    _check_memory(path, count)
     pts, nrm, col = _points(path, count)
     a, e = math.radians(azimuth), math.radians(elevation)
     # camera orbit: rotate the model by -azimuth about Y, then tilt by elevation about X
