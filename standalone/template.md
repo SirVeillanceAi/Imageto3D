@@ -27,6 +27,7 @@ bash -c "apt-get update && apt-get install -y git ca-certificates && rm -rf /opt
 |---|---|---|
 | `GRADIO_USERNAME` / `GRADIO_PASSWORD` | – | **Recommended.** Adds a login to the app – the RunPod link is otherwise open to anyone who has it. Use RunPod **Secrets**. |
 | `MODELS` | `trellis2,pixal3d,hi3d` | Which model sets to download. |
+| `PIXAL3D_MULTIVIEW` | `1` | Downloads the Pixal3D multi-view model (5–6 GB) for the multi-view tab. `0` skips it. |
 | `HI3D_PRECISION` | `int8` | `int8` (4.3 GB, faster) or `fp16` (7.7 GB). |
 | `HF_TOKEN` | – | Only needed if a Hugging Face repo becomes gated. |
 | `TORCH_CHANNEL` | `auto` | `auto` picks cu130 on CUDA 13 hosts, cu128 on CUDA 12.8 hosts. |

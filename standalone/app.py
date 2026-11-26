@@ -32,6 +32,7 @@ REQUIRED = {
     "trellis2": [("diffusion_models", P.TRELLIS2_UNET), ("vae", P.SHAPE_VAE), ("clip_vision", P.DINO_V3)],
     "pixal3d": [("diffusion_models", P.PIXAL3D_UNET), ("vae", P.SHAPE_VAE), ("clip_vision", P.DINO_V3),
                 ("geometry_estimation", P.MOGE)],
+    "pixal3d_mv": [("diffusion_models", P.PIXAL3D_MV_UNET), ("vae", P.SHAPE_VAE), ("clip_vision", P.DINO_V3)],
     "texture": [("vae", P.TEXTURE_VAE)],
     "background": [("background_removal", P.BIREFNET)],
     "hi3d": [("checkpoints", P.HI3D_CKPT), ("clip_vision", P.DINO_V2), ("clip_vision", P.CLIP_L)],
@@ -179,6 +180,32 @@ def generate(image, model, remove_bg, resolution, texture, texture_size, face_co
     return preview, all_files, note, seed
 
 
+def multiview(front, left, back, right, remove_bg, fov, resolution, texture, texture_size, face_count, hi3d,
+              seed, randomize, progress=gr.Progress()):
+    given = {k: v for k, v in {"front": front, "left": left, "back": back, "right": right}.items() if v}
+    if not given:
+        raise gr.Error("Upload at least one view (front recommended).")
+    hi3d = "off" if hi3d == "Off" else hi3d
+    _check(["pixal3d_mv"] + (["texture"] if texture else []) + (["hi3d"] if hi3d != "off" else [])
+           + (["background"] if remove_bg else []))
+    seed = _seed(seed, randomize)
+    run = time.strftime("%Y%m%d-%H%M%S")
+    graph = P.multiview_to_3d({k: _stage_image(v) for k, v in given.items()}, remove_background=remove_bg,
+                              seed=seed, fov=fov, resolution=int(resolution), texture=texture,
+                              texture_size=int(texture_size), face_count=int(face_count), hi3d=hi3d,
+                              prefix=f"imageto3d/{run}_multiview")
+    t0 = time.time()
+    files = run_graph(graph, progress)
+    order = ["save_textured"] + [f"save_hi3d_{r}" for r in reversed(P.HI3D_LADDER)] + ["save_shape"]
+    all_files = [f for k in order for f in files.get(k, [])]
+    if not all_files:
+        raise gr.Error("The job finished but produced no GLB file - check /workspace/logs/comfyui.log.")
+    note = f"Done in {time.time() - t0:.0f} s - Pixal3D multi-view ({', '.join(given)}), seed {seed}."
+    if hi3d != "off":
+        note += " Hi3D files are geometry only (no texture)."
+    return all_files[0], all_files, note, seed
+
+
 def refine(mesh, image, target, remove_bg, seed, randomize, progress=gr.Progress()):
     if mesh is None or image is None:
         raise gr.Error("Upload both a mesh and the reference image of the same object.")
@@ -223,7 +250,7 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
     with gr.Tab("Image → 3D"):
         with gr.Row():
             with gr.Column(scale=1):
-                in_image = gr.Image(label="Input image", type="filepath", image_mode="RGBA", height=320)
+                in_image = gr.Image(label="Input image", type="filepath", image_mode=None, height=320)
                 in_model = gr.Radio(["TRELLIS.2", "Pixal3D"], value="TRELLIS.2", label="Model",
                                     info="Pixal3D keeps the front view pixel-aligned to your image.")
                 in_bg = gr.Checkbox(value=True, label="Remove background (BiRefNet)",
@@ -247,13 +274,49 @@ with gr.Blocks(title="Imageto3D - TRELLIS.2 / Pixal3D / Hi3D") as demo:
         btn_gen.click(generate, [in_image, in_model, in_bg, in_res, in_tex, in_texsize, in_faces, in_hi3d,
                                  in_seed, in_rand], [out_model, out_files, out_note, in_seed])
 
+    with gr.Tab("Multi-view → 3D (Pixal3D)"):
+        gr.Markdown("Photos of the **same object** from views 90° apart: front, left side, back, right side. "
+                    "Any subset works; front is recommended. Keep the object about the same size in every photo.")
+        with gr.Row():
+            with gr.Column(scale=1):
+                with gr.Row():
+                    mv_front = gr.Image(label="Front", type="filepath", image_mode=None, height=200)
+                    mv_left = gr.Image(label="Left side", type="filepath", image_mode=None, height=200)
+                with gr.Row():
+                    mv_back = gr.Image(label="Back", type="filepath", image_mode=None, height=200)
+                    mv_right = gr.Image(label="Right side", type="filepath", image_mode=None, height=200)
+                examples_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
+                if os.path.isfile(os.path.join(examples_dir, "tailfin_front.jpg")):
+                    gr.Examples([[os.path.join(examples_dir, f"tailfin_{v}.jpg") if v else None
+                                  for v in ("front", None, "back", "right")]],
+                                inputs=[mv_front, mv_left, mv_back, mv_right], label="Example: marble whale tail")
+                mv_bg = gr.Checkbox(value=True, label="Remove background (BiRefNet)")
+                mv_fov = gr.Slider(5, 90, value=20, step=1, label="Camera field of view (degrees)",
+                                   info="20 suits most photos taken from a distance; raise it for close-up wide-angle shots.")
+                mv_res = gr.Radio(["1024", "1536"], value="1024", label="Shape resolution")
+                mv_tex = gr.Checkbox(value=True, label="PBR texture")
+                with gr.Accordion("Texture & mesh settings", open=False):
+                    mv_texsize = gr.Radio(["1024", "2048", "4096"], value="2048", label="Texture size")
+                    mv_faces = gr.Slider(50000, 1500000, value=700000, step=10000, label="Textured mesh face count")
+                mv_hi3d = gr.Radio(["Off", "512", "1024", "1536"], value="Off", label="Hi3D refine (geometry only)")
+                with gr.Row():
+                    mv_seed = gr.Number(value=42, precision=0, label="Seed")
+                    mv_rand = gr.Checkbox(value=False, label="Random seed")
+                btn_mv = gr.Button("Generate 3D from views", variant="primary")
+            with gr.Column(scale=1):
+                mv_out = gr.Model3D(label="Preview", height=480, clear_color=(0.15, 0.15, 0.15, 1.0))
+                mv_files = gr.File(label="Download GLB files", file_count="multiple")
+                mv_note = gr.Markdown()
+        btn_mv.click(multiview, [mv_front, mv_left, mv_back, mv_right, mv_bg, mv_fov, mv_res, mv_tex, mv_texsize,
+                                 mv_faces, mv_hi3d, mv_seed, mv_rand], [mv_out, mv_files, mv_note, mv_seed])
+
     with gr.Tab("Hi3D refine (your mesh)"):
         gr.Markdown("Bring a coarse mesh and a reference image of the **same object**. "
                     "Hi3D re-samples the geometry against the image and returns a denser, untextured mesh.")
         with gr.Row():
             with gr.Column(scale=1):
                 r_mesh = gr.File(label="Coarse mesh (.glb / .gltf / .obj / .stl)", file_types=[".glb", ".gltf", ".obj", ".stl"], type="filepath")
-                r_image = gr.Image(label="Reference image", type="filepath", image_mode="RGBA", height=280)
+                r_image = gr.Image(label="Reference image", type="filepath", image_mode=None, height=280)
                 r_target = gr.Radio(["512", "1024", "1536"], value="1536", label="Refine up to")
                 r_bg = gr.Checkbox(value=True, label="Remove background (BiRefNet)")
                 with gr.Row():
@@ -276,4 +339,5 @@ if __name__ == "__main__":
     user, pw = os.environ.get("GRADIO_USERNAME"), os.environ.get("GRADIO_PASSWORD")
     demo.queue(default_concurrency_limit=1).launch(
         server_name="0.0.0.0", server_port=int(os.environ.get("GRADIO_PORT", 7860)),
-        auth=(user, pw) if user and pw else None, allowed_paths=[OUTPUT_DIR], show_error=True)
+        auth=(user, pw) if user and pw else None,
+        allowed_paths=[OUTPUT_DIR, os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")], show_error=True)

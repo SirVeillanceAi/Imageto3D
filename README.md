@@ -14,6 +14,7 @@ Both run the same models the same way, so results match.
 ## Standalone Gradio app
 
 - **Image → 3D:** upload a picture, pick **TRELLIS.2** or **Pixal3D**, optionally bake a PBR texture (base color, metal, roughness, normal, AO), optionally run **Hi3D** refinement (512 → 1024 → 1536). Preview in the browser and download every GLB.
+- **Multi-view → 3D (Pixal3D):** up to four photos of the same object (front, left, back, right, 90° apart) for a more accurate shape. Includes a one-click example (a marble whale tail: front, right and back).
 - **Hi3D refine (your mesh):** upload your own coarse mesh (.glb/.gltf/.obj/.stl) plus a reference image of the same object to get a much denser mesh.
 - **Status:** GPU, engine and model-download status.
 

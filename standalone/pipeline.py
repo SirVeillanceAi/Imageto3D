@@ -10,6 +10,7 @@ import os
 
 TRELLIS2_UNET = "trellis_2_int8_convrot.safetensors"
 PIXAL3D_UNET = "pixal3d_int8_convrot.safetensors"
+PIXAL3D_MV_UNET = "pixal3d_multiview_int8_convrot.safetensors"
 SHAPE_VAE = "trellis_2_shape_vae_bf16.safetensors"
 TEXTURE_VAE = "trellis_2_texture_vae_bf16.safetensors"
 DINO_V3 = "dino_v3_L_naf_fp32.safetensors"
@@ -110,6 +111,47 @@ def image_to_3d(image_name, model="trellis2", remove_background=True, seed=42, r
               image=g.out("crop"), camera_angle_x=g.out("fov"))
     pos, neg = g.out("cond"), g.out("cond", 1)
 
+    _generate(g, pos, neg, seed, resolution, texture, texture_size, face_count, prefix)
+    if hi3d != "off":
+        _hi3d_chain(g, g.out("shape_decode"), image, mask, hi3d, seed, prefix)
+    return g.nodes
+
+
+def multiview_to_3d(views, remove_background=True, seed=42, fov=20.0, resolution=1024, texture=True,
+                    texture_size=2048, face_count=700000, hi3d="off", prefix="imageto3d/multiview"):
+    """Pixal3D multi-view: {"front"|"left"|"back"|"right": image name}, views 90 degrees apart."""
+    LABELS.clear()
+    g = Graph()
+    if remove_background:
+        g.add("bg_model", "LoadBackgroundRemovalModel", "Load BiRefNet", bg_removal_name=BIREFNET)
+    cropped = {}
+    for side in ("front", "left", "back", "right"):
+        if not views.get(side):
+            continue
+        g.add(f"load_{side}", "LoadImage", f"Load {side} view", image=views[side])
+        mask = g.out(f"load_{side}", 1)
+        if remove_background:
+            mask = g.out(g.add(f"remove_bg_{side}", "RemoveBackground", f"Remove background ({side})",
+                               bg_removal_model=g.out("bg_model"), image=g.out(f"load_{side}")))
+        cropped[side] = g.out(g.add(f"crop_{side}", "ImageCropToMask", f"Crop {side} view",
+                                    images=g.out(f"load_{side}"), masks=mask, width=1024, height=1024,
+                                    pad_factor=1.1, grow_mask=0, background="#000000"))
+    g.add("unet", "UNETLoader", "Load Pixal3D multi-view", unet_name=PIXAL3D_MV_UNET, weight_dtype="default")
+    g.add("shape_vae", "VAELoader", "Load shape VAE", vae_name=SHAPE_VAE)
+    g.add("dino_v3", "CLIPVisionLoader", "Load DINOv3", clip_name=DINO_V3)
+    g.add("cond", "Pixal3DMultiViewConditioning", "Pixal3D multi-view conditioning",
+          clip_vision_model=g.out("dino_v3"), fov=float(fov), **cropped)
+    _generate(g, g.out("cond"), g.out("cond", 1), seed, resolution, texture, texture_size, face_count, prefix)
+    if hi3d != "off":
+        first = next(side for side in ("front", "left", "back", "right") if side in cropped)
+        mask = g.out(f"remove_bg_{first}") if remove_background else g.out(f"load_{first}", 1)
+        _hi3d_chain(g, g.out("shape_decode"), g.out(f"load_{first}"), mask, hi3d, seed, prefix)
+    return g.nodes
+
+
+def _generate(g, pos, neg, seed, resolution, texture, texture_size, face_count, prefix):
+    """Shared TRELLIS.2-family stages: structure -> shape 512 -> upsample -> optional PBR texture.
+    Expects "unet" and "shape_vae" nodes in the graph."""
     # Structure stage
     g.add("struct_cfg", "CFGOverride", model=g.out("unet"), cfg=1.0, start_percent=0.667, end_percent=1.0)
     g.add("struct_rescale", "RescaleCFG", model=g.out("struct_cfg"), multiplier=0.7)
@@ -167,9 +209,6 @@ def image_to_3d(image_name, model="trellis2", remove_background=True, seed=42, r
         g.add("tex_final", "MeshSmoothNormals", mesh=g.out("tex_apply"), crease_angle=180.0)
         g.add("save_textured", "SaveGLB", "Save textured mesh", mesh=g.out("tex_final"), filename_prefix=f"{prefix}_textured")
 
-    if hi3d != "off":
-        _hi3d_chain(g, g.out("shape_decode"), image, mask, hi3d, seed, prefix)
-    return g.nodes
 
 
 def refine_mesh(image_name, mesh_name, target="1536", remove_background=True, seed=42, prefix="imageto3d/refine"):
